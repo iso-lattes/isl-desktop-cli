@@ -1,9 +1,18 @@
 use anyhow::{Context as _, Result, anyhow, bail};
 use flags2env::BundledFlags2Env;
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, env, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use uuid::Uuid;
+
+const MAX_TIMEOUT_MS: u64 = 20 * 60 * 1_000;
 
 #[allow(non_snake_case)]
 #[derive(Debug, Deserialize)]
@@ -13,6 +22,7 @@ struct CliConfig {
     ISL_DESKTOP_TENANT_ID: Option<String>,
     ISL_DESKTOP_DEPLOYMENT_ID: Option<String>,
     ISL_DESKTOP_PAYLOAD: Option<Value>,
+    ISL_DESKTOP_TOKEN_FILE: Option<String>,
     FLAGS2ENV_COMMAND: Option<String>,
 }
 
@@ -43,7 +53,10 @@ async fn run() -> Result<()> {
         .parse_structured(&argv, Some(config_path_text))
         .map_err(|error| anyhow!("flags-2-env parse failed: {error}"))?;
     if !parsed.unknown_options.is_empty() {
-        bail!("unknown command-line options: {}", parsed.unknown_options.len());
+        bail!(
+            "unknown command-line options: {}",
+            parsed.unknown_options.len()
+        );
     }
     if !parsed.errors.is_empty() {
         bail!("invalid command-line values: {}", parsed.errors.join("; "));
@@ -58,20 +71,37 @@ async fn run() -> Result<()> {
     let config = parser
         .coerce::<CliConfig, _>(&raw, Some(config_path_text))
         .map_err(|error| anyhow!("flags-2-env typed configuration failed: {error}"))?;
+
     let command = config.FLAGS2ENV_COMMAND.as_deref().unwrap_or("");
+    let daemon_url = validate_loopback_url(&config.ISL_DESKTOP_DAEMON_URL)?;
     let timeout_ms = u64::try_from(config.ISL_DESKTOP_TIMEOUT_MS)
         .ok()
-        .filter(|value| *value > 0 && *value <= 1_200_000)
-        .ok_or_else(|| anyhow!("--timeout must be between 1 and 1200000 ms"))?;
-    let token = read_token()?;
+        .filter(|value| *value > 0 && *value <= MAX_TIMEOUT_MS)
+        .ok_or_else(|| anyhow!("--timeout must be between 1 and {MAX_TIMEOUT_MS} ms"))?;
+    let token_path = token_path(config.ISL_DESKTOP_TOKEN_FILE.as_deref())?;
+    let token = read_token(&token_path)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(timeout_ms.saturating_add(2_000)))
         .build()?;
 
     match command {
         "status" => {
+            get_and_print(&client, &daemon_url, "/v1/status", &token).await?;
+        }
+        "doctor" => {
+            get_and_print(&client, &daemon_url, "/v1/doctor", &token).await?;
+        }
+        "cells" => {
+            get_and_print(&client, &daemon_url, "/v1/cells", &token).await?;
+        }
+        "retire" => {
+            let tenant_id = required(config.ISL_DESKTOP_TENANT_ID, "--tenant")?;
+            let deployment_id = required(config.ISL_DESKTOP_DEPLOYMENT_ID, "--deployment")?;
+            validate_identifier("tenant", &tenant_id)?;
+            validate_identifier("deployment", &deployment_id)?;
+            let path = format!("/v1/cells/{tenant_id}/{deployment_id}/retire");
             let response = client
-                .get(format!("{}/v1/status", trim_url(&config.ISL_DESKTOP_DAEMON_URL)))
+                .post(endpoint(&daemon_url, &path)?)
                 .bearer_auth(&token)
                 .send()
                 .await?;
@@ -80,6 +110,8 @@ async fn run() -> Result<()> {
         "invoke" => {
             let tenant_id = required(config.ISL_DESKTOP_TENANT_ID, "--tenant")?;
             let deployment_id = required(config.ISL_DESKTOP_DEPLOYMENT_ID, "--deployment")?;
+            validate_identifier("tenant", &tenant_id)?;
+            validate_identifier("deployment", &deployment_id)?;
             let payload_json = config.ISL_DESKTOP_PAYLOAD.unwrap_or_else(|| json!({}));
             let body = json!({
                 "invocation_id": Uuid::new_v4().to_string(),
@@ -89,7 +121,7 @@ async fn run() -> Result<()> {
                 "timeout_ms": timeout_ms,
             });
             let response = client
-                .post(format!("{}/v1/invoke", trim_url(&config.ISL_DESKTOP_DAEMON_URL)))
+                .post(endpoint(&daemon_url, "/v1/invoke")?)
                 .bearer_auth(&token)
                 .json(&body)
                 .send()
@@ -97,21 +129,82 @@ async fn run() -> Result<()> {
             print_response(response).await?;
         }
         _ => {
-            bail!("command required: status or invoke");
+            bail!("command required: status, doctor, cells, retire, or invoke");
         }
     }
 
     return Ok(());
 }
 
+async fn get_and_print(
+    client: &reqwest::Client,
+    base: &Url,
+    path: &str,
+    token: &str,
+) -> Result<()> {
+    let response = client
+        .get(endpoint(base, path)?)
+        .bearer_auth(token)
+        .send()
+        .await?;
+    return print_response(response).await;
+}
+
 async fn print_response(response: reqwest::Response) -> Result<()> {
     let status = response.status();
     let body = response.text().await?;
     if !status.is_success() {
-        bail!("daemon returned {status}: {body}");
+        let summary = body.chars().take(2_048).collect::<String>();
+        bail!("daemon returned {status}: {summary}");
     }
     let value: Value = serde_json::from_str(&body).context("daemon response was not JSON")?;
     println!("{}", serde_json::to_string_pretty(&value)?);
+    return Ok(());
+}
+
+fn endpoint(base: &Url, path: &str) -> Result<Url> {
+    return base
+        .join(path)
+        .context("cannot build local daemon endpoint");
+}
+
+fn validate_loopback_url(raw: &str) -> Result<Url> {
+    let url = Url::parse(raw).context("daemon URL is invalid")?;
+    if url.scheme() != "http" {
+        bail!("daemon URL must use http:// on loopback");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("daemon URL must not contain credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("daemon URL must not contain query or fragment components");
+    }
+    if url.path() != "/" && !url.path().is_empty() {
+        bail!("daemon URL must be an origin without a path");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("daemon URL must include a host"))?;
+    let ip = host
+        .parse::<IpAddr>()
+        .context("daemon URL host must be a numeric loopback address")?;
+    if !ip.is_loopback() {
+        bail!("daemon URL host must be loopback");
+    }
+    return Ok(url);
+}
+
+fn validate_identifier(name: &str, value: &str) -> Result<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && value != "."
+        && value != "..";
+    if !valid {
+        bail!("invalid {name}");
+    }
     return Ok(());
 }
 
@@ -119,10 +212,6 @@ fn required(value: Option<String>, flag: &str) -> Result<String> {
     return value
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| anyhow!("{flag} is required"));
-}
-
-fn trim_url(value: &str) -> &str {
-    return value.trim_end_matches('/');
 }
 
 fn resolve_config_path() -> Result<PathBuf> {
@@ -150,18 +239,57 @@ fn resolve_config_path() -> Result<PathBuf> {
     bail!("cannot locate .cli-flags.toml");
 }
 
-fn read_token() -> Result<String> {
-    let path = if let Some(path) = env::var_os("ISL_DESKTOP_TOKEN_FILE") {
-        PathBuf::from(path)
-    } else {
-        let home = env::var_os("HOME").ok_or_else(|| anyhow!("HOME is required"))?;
-        PathBuf::from(home).join(".iso-lattes/daemon/token")
-    };
-    let token = std::fs::read_to_string(&path)
+fn token_path(configured: Option<&str>) -> Result<PathBuf> {
+    if let Some(path) = configured.filter(|value| !value.trim().is_empty()) {
+        return expand_home(Path::new(path));
+    }
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .ok_or_else(|| anyhow!("HOME or USERPROFILE is required"))?;
+    return Ok(PathBuf::from(home).join(".iso-lattes/daemon/token"));
+}
+
+fn expand_home(path: &Path) -> Result<PathBuf> {
+    let text = path.to_string_lossy();
+    if text == "~" || text.starts_with("~/") {
+        let home = env::var_os("HOME")
+            .or_else(|| env::var_os("USERPROFILE"))
+            .ok_or_else(|| anyhow!("HOME or USERPROFILE is required"))?;
+        let suffix = text.trim_start_matches('~').trim_start_matches('/');
+        return Ok(PathBuf::from(home).join(suffix));
+    }
+    return Ok(path.to_path_buf());
+}
+
+fn read_token(path: &Path) -> Result<String> {
+    let token = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read daemon token at {}", path.display()))?;
     let token = token.trim();
-    if token.len() < 32 {
+    if token.len() < 32 || token.chars().any(char::is_whitespace) {
         bail!("daemon token is invalid");
     }
     return Ok(token.to_owned());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_url_must_be_numeric_loopback_http_origin() {
+        assert!(validate_loopback_url("http://127.0.0.1:8761").is_ok());
+        assert!(validate_loopback_url("http://[::1]:8761").is_ok());
+        assert!(validate_loopback_url("https://127.0.0.1:8761").is_err());
+        assert!(validate_loopback_url("http://localhost:8761").is_err());
+        assert!(validate_loopback_url("http://192.0.2.10:8761").is_err());
+        assert!(validate_loopback_url("http://user:secret@127.0.0.1:8761").is_err());
+        assert!(validate_loopback_url("http://127.0.0.1:8761/path").is_err());
+    }
+
+    #[test]
+    fn identifiers_reject_path_traversal() {
+        assert!(validate_identifier("deployment", "deploy-1").is_ok());
+        assert!(validate_identifier("deployment", "..").is_err());
+        assert!(validate_identifier("deployment", "tenant/escape").is_err());
+    }
 }
