@@ -168,6 +168,20 @@ fn endpoint(base: &Url, path: &str) -> Result<Url> {
         .context("cannot build local daemon endpoint");
 }
 
+fn parse_numeric_loopback_host(host: &str) -> Result<IpAddr> {
+    let normalized = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    let ip = normalized
+        .parse::<IpAddr>()
+        .context("daemon URL host must be a numeric loopback address")?;
+    if !ip.is_loopback() {
+        bail!("daemon URL host must be loopback");
+    }
+    return Ok(ip);
+}
+
 fn validate_loopback_url(raw: &str) -> Result<Url> {
     let url = Url::parse(raw).context("daemon URL is invalid")?;
     if url.scheme() != "http" {
@@ -185,12 +199,7 @@ fn validate_loopback_url(raw: &str) -> Result<Url> {
     let host = url
         .host_str()
         .ok_or_else(|| anyhow!("daemon URL must include a host"))?;
-    let ip = host
-        .parse::<IpAddr>()
-        .context("daemon URL host must be a numeric loopback address")?;
-    if !ip.is_loopback() {
-        bail!("daemon URL host must be loopback");
-    }
+    let _ = parse_numeric_loopback_host(host)?;
     return Ok(url);
 }
 
