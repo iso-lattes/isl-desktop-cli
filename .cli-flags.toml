@@ -12,6 +12,27 @@ ignore = ["ISL_DESKTOP_TOKEN"]
 [commands.status]
 help = "Show local iso-lattes daemon and V8-cell status."
 
+[commands.doctor]
+help = "Show local daemon diagnostics and V8-cell counters."
+
+[commands.cells]
+help = "List reusable V8 cells owned by isl-desktop-daemon."
+
+[commands.retire]
+help = "Retire one tenant + deployment V8 cell through isl-desktop-daemon."
+
+[commands.retire.flags.tenant]
+env = "ISL_DESKTOP_TENANT_ID"
+aliases = ["tenant"]
+type = "string"
+help = "Tenant id of the V8 cell."
+
+[commands.retire.flags.deployment]
+env = "ISL_DESKTOP_DEPLOYMENT_ID"
+aliases = ["deployment"]
+type = "string"
+help = "Immutable deployment generation id of the V8 cell."
+
 [commands.invoke]
 help = "Invoke a local deployment through isl-desktop-daemon."
 
@@ -41,7 +62,7 @@ aliases = ["url"]
 short = "u"
 type = "string"
 default = "http://127.0.0.1:8761"
-help = "Loopback URL of isl-desktop-daemon."
+help = "Credential-free numeric-loopback URL of isl-desktop-daemon."
 
 [flags.timeout]
 env = "ISL_DESKTOP_TIMEOUT_MS"
@@ -50,3 +71,9 @@ short = "t"
 type = "integer"
 default = 30000
 help = "Invocation timeout in milliseconds."
+
+[flags.token-file]
+env = "ISL_DESKTOP_TOKEN_FILE"
+aliases = ["token-file"]
+type = "string"
+help = "Path to the local daemon bearer-token file; defaults to ~/.iso-lattes/daemon/token."
