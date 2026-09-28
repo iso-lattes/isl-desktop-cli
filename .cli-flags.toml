@@ -7,10 +7,31 @@ stop_at_first_positional = false
 allow_unknown = false
 
 [env]
-ignore = ["ISL_DESKTOP_TOKEN"]
+ignore = ["ISL_DESKTOP_TOKEN_FILE"]
 
 [commands.status]
 help = "Show local iso-lattes daemon and V8-cell status."
+
+[commands.doctor]
+help = "Run the authenticated local daemon diagnostic/status probe."
+
+[commands.cells]
+help = "List reusable V8 cells and their tenant/deployment scope."
+
+[commands.retire]
+help = "Retire one reusable V8 cell for a tenant+deployment generation."
+
+[commands.retire.flags.tenant]
+env = "ISL_DESKTOP_TENANT_ID"
+aliases = ["tenant"]
+type = "string"
+help = "Tenant id."
+
+[commands.retire.flags.deployment]
+env = "ISL_DESKTOP_DEPLOYMENT_ID"
+aliases = ["deployment"]
+type = "string"
+help = "Immutable deployment/generation id."
 
 [commands.invoke]
 help = "Invoke a local deployment through isl-desktop-daemon."
@@ -41,7 +62,7 @@ aliases = ["url"]
 short = "u"
 type = "string"
 default = "http://127.0.0.1:8761"
-help = "Loopback URL of isl-desktop-daemon."
+help = "Loopback-only HTTP origin of isl-desktop-daemon."
 
 [flags.timeout]
 env = "ISL_DESKTOP_TIMEOUT_MS"
