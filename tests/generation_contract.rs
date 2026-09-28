@@ -46,8 +46,7 @@ fn generation_contract_is_pinned_and_fail_closed() -> Result<()> {
         .get("authority")
         .context("authority object is required")?;
     ensure!(
-        authority.get("repository").and_then(Value::as_str)
-            == Some(EXPECTED_AUTHORITY_REPOSITORY),
+        authority.get("repository").and_then(Value::as_str) == Some(EXPECTED_AUTHORITY_REPOSITORY),
         "generation authority repository drifted"
     );
     ensure!(
@@ -55,8 +54,7 @@ fn generation_contract_is_pinned_and_fail_closed() -> Result<()> {
         "generation authority pull request drifted"
     );
     ensure!(
-        authority.get("revision").and_then(Value::as_str)
-            == Some(EXPECTED_AUTHORITY_REVISION),
+        authority.get("revision").and_then(Value::as_str) == Some(EXPECTED_AUTHORITY_REVISION),
         "generation authority revision drifted"
     );
 
