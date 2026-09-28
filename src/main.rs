@@ -310,12 +310,12 @@ mod tests {
         use std::os::unix::fs::{PermissionsExt, symlink};
 
         let root = env::temp_dir().join(format!("isl-cli-token-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).expect("create test dir");
+        assert!(fs::create_dir_all(&root).is_ok());
         let target = root.join("target");
-        fs::write(&target, "abcdefghijklmnopqrstuvwxyz0123456789\n").expect("write target");
-        fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).expect("chmod target");
+        assert!(fs::write(&target, "abcdefghijklmnopqrstuvwxyz0123456789\n").is_ok());
+        assert!(fs::set_permissions(&target, fs::Permissions::from_mode(0o600)).is_ok());
         let link = root.join("token");
-        symlink(&target, &link).expect("create symlink");
+        assert!(symlink(&target, &link).is_ok());
         assert!(read_token_file(&link).is_err());
         let _ = fs::remove_dir_all(root);
     }
