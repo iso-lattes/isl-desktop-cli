@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use flags2env::BundledFlags2Env;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{collections::HashMap, env, path::PathBuf, time::Duration};
+use std::{collections::HashMap, env, net::IpAddr, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 #[allow(non_snake_case)]
@@ -43,7 +43,10 @@ async fn run() -> Result<()> {
         .parse_structured(&argv, Some(config_path_text))
         .map_err(|error| anyhow!("flags-2-env parse failed: {error}"))?;
     if !parsed.unknown_options.is_empty() {
-        bail!("unknown command-line options: {}", parsed.unknown_options.len());
+        bail!(
+            "unknown command-line options: {}",
+            parsed.unknown_options.len()
+        );
     }
     if !parsed.errors.is_empty() {
         bail!("invalid command-line values: {}", parsed.errors.join("; "));
@@ -58,20 +61,35 @@ async fn run() -> Result<()> {
     let config = parser
         .coerce::<CliConfig, _>(&raw, Some(config_path_text))
         .map_err(|error| anyhow!("flags-2-env typed configuration failed: {error}"))?;
-    let command = config.FLAGS2ENV_COMMAND.as_deref().unwrap_or("");
     let timeout_ms = u64::try_from(config.ISL_DESKTOP_TIMEOUT_MS)
         .ok()
         .filter(|value| *value > 0 && *value <= 1_200_000)
         .ok_or_else(|| anyhow!("--timeout must be between 1 and 1200000 ms"))?;
     let token = read_token()?;
+    let base = validate_daemon_origin(&config.ISL_DESKTOP_DAEMON_URL)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(timeout_ms.saturating_add(2_000)))
         .build()?;
 
-    match command {
+    match config.FLAGS2ENV_COMMAND.as_deref().unwrap_or("") {
         "status" => {
+            send_get(&client, &base, "/v1/status", &token).await?;
+        }
+        "doctor" => {
+            send_get(&client, &base, "/v1/doctor", &token).await?;
+        }
+        "cells" => {
+            send_get(&client, &base, "/v1/cells", &token).await?;
+        }
+        "retire" => {
+            let tenant_id = required(config.ISL_DESKTOP_TENANT_ID, "--tenant")?;
+            let deployment_id = required(config.ISL_DESKTOP_DEPLOYMENT_ID, "--deployment")?;
+            validate_identifier("tenant", &tenant_id)?;
+            validate_identifier("deployment", &deployment_id)?;
             let response = client
-                .get(format!("{}/v1/status", trim_url(&config.ISL_DESKTOP_DAEMON_URL)))
+                .post(format!(
+                    "{base}/v1/cells/{tenant_id}/{deployment_id}/retire"
+                ))
                 .bearer_auth(&token)
                 .send()
                 .await?;
@@ -80,16 +98,17 @@ async fn run() -> Result<()> {
         "invoke" => {
             let tenant_id = required(config.ISL_DESKTOP_TENANT_ID, "--tenant")?;
             let deployment_id = required(config.ISL_DESKTOP_DEPLOYMENT_ID, "--deployment")?;
-            let payload_json = config.ISL_DESKTOP_PAYLOAD.unwrap_or_else(|| json!({}));
+            validate_identifier("tenant", &tenant_id)?;
+            validate_identifier("deployment", &deployment_id)?;
             let body = json!({
                 "invocation_id": Uuid::new_v4().to_string(),
                 "tenant_id": tenant_id,
                 "deployment_id": deployment_id,
-                "payload_json": payload_json,
+                "payload_json": config.ISL_DESKTOP_PAYLOAD.unwrap_or_else(|| json!({})),
                 "timeout_ms": timeout_ms,
             });
             let response = client
-                .post(format!("{}/v1/invoke", trim_url(&config.ISL_DESKTOP_DAEMON_URL)))
+                .post(format!("{base}/v1/invoke"))
                 .bearer_auth(&token)
                 .json(&body)
                 .send()
@@ -97,11 +116,20 @@ async fn run() -> Result<()> {
             print_response(response).await?;
         }
         _ => {
-            bail!("command required: status or invoke");
+            bail!("command required: status, doctor, cells, retire, or invoke");
         }
     }
 
     return Ok(());
+}
+
+async fn send_get(client: &reqwest::Client, base: &str, path: &str, token: &str) -> Result<()> {
+    let response = client
+        .get(format!("{base}{path}"))
+        .bearer_auth(token)
+        .send()
+        .await?;
+    return print_response(response).await;
 }
 
 async fn print_response(response: reqwest::Response) -> Result<()> {
@@ -121,8 +149,47 @@ fn required(value: Option<String>, flag: &str) -> Result<String> {
         .ok_or_else(|| anyhow!("{flag} is required"));
 }
 
-fn trim_url(value: &str) -> &str {
-    return value.trim_end_matches('/');
+fn validate_identifier(name: &str, value: &str) -> Result<()> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+    if !valid {
+        bail!("invalid {name} identifier");
+    }
+    return Ok(());
+}
+
+fn validate_daemon_origin(raw: &str) -> Result<String> {
+    let url = reqwest::Url::parse(raw).context("ISL_DESKTOP_DAEMON_URL is not a valid URL")?;
+    if url.scheme() != "http" {
+        bail!("ISL_DESKTOP_DAEMON_URL must use http on loopback");
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("ISL_DESKTOP_DAEMON_URL must not contain credentials");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        bail!("ISL_DESKTOP_DAEMON_URL must not contain query or fragment data");
+    }
+    if url.path() != "/" && !url.path().is_empty() {
+        bail!("ISL_DESKTOP_DAEMON_URL must be an origin without a path");
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("ISL_DESKTOP_DAEMON_URL requires a host"))?;
+    let normalized_host = host.trim_start_matches('[').trim_end_matches(']');
+    let loopback = normalized_host.eq_ignore_ascii_case("localhost")
+        || normalized_host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false);
+    if !loopback {
+        bail!("ISL_DESKTOP_DAEMON_URL must target loopback");
+    }
+    return Ok(raw.trim_end_matches('/').to_owned());
 }
 
 fn resolve_config_path() -> Result<PathBuf> {
@@ -160,8 +227,32 @@ fn read_token() -> Result<String> {
     let token = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read daemon token at {}", path.display()))?;
     let token = token.trim();
-    if token.len() < 32 {
+    if token.len() < 32 || token.chars().any(char::is_whitespace) {
         bail!("daemon token is invalid");
     }
     return Ok(token.to_owned());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_loopback_http_origins() {
+        assert!(validate_daemon_origin("http://127.0.0.1:8761").is_ok());
+        assert!(validate_daemon_origin("http://[::1]:8761").is_ok());
+        assert!(validate_daemon_origin("http://localhost:8761").is_ok());
+        assert!(validate_daemon_origin("https://127.0.0.1:8761").is_err());
+        assert!(validate_daemon_origin("http://example.com:8761").is_err());
+        assert!(validate_daemon_origin("http://user:pass@127.0.0.1:8761").is_err());
+        assert!(validate_daemon_origin("http://127.0.0.1:8761/v1").is_err());
+    }
+
+    #[test]
+    fn identifiers_reject_path_traversal() {
+        assert!(validate_identifier("tenant", "tenant-1").is_ok());
+        assert!(validate_identifier("deployment", "generation.v1").is_ok());
+        assert!(validate_identifier("tenant", "..").is_err());
+        assert!(validate_identifier("tenant", "tenant/child").is_err());
+    }
 }
