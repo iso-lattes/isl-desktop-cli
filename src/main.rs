@@ -176,10 +176,7 @@ async fn read_bounded_body(mut response: reqwest::Response, max_bytes: usize) ->
 }
 
 fn self_update() -> Result<()> {
-    let package = format!(
-        "iso-lattes/isl-desktop-cli@{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    let package = format!("iso-lattes/isl-desktop-cli@{}", env!("CARGO_PKG_VERSION"));
     let status = Command::new("zed")
         .args(["install", &package, "--allow-build", "--adapter", "none"])
         .status()
