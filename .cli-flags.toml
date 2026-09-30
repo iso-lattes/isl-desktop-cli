@@ -12,6 +12,9 @@ ignore = ["ISL_DESKTOP_TOKEN_FILE"]
 [commands.status]
 help = "Show local iso-lattes daemon and V8-cell status."
 
+[commands.self-update]
+help = "Update isl-desktop-cli through zed-pkg without requiring daemon credentials."
+
 [commands.doctor]
 help = "Run the authenticated local daemon diagnostic/status probe."
 

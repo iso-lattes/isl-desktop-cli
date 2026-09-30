@@ -6,6 +6,7 @@ use std::{
     collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 use uuid::Uuid;
@@ -69,6 +70,10 @@ async fn run() -> Result<()> {
     let config = parser
         .coerce::<CliConfig, _>(&raw, Some(config_path_text))
         .map_err(|error| anyhow!("flags-2-env typed configuration failed: {error}"))?;
+    if config.FLAGS2ENV_COMMAND.as_deref() == Some("self-update") {
+        return self_update();
+    }
+
     let timeout_ms = u64::try_from(config.ISL_DESKTOP_TIMEOUT_MS)
         .ok()
         .filter(|value| *value > 0 && *value <= 1_200_000)
@@ -168,6 +173,18 @@ async fn read_bounded_body(mut response: reqwest::Response, max_bytes: usize) ->
         body.extend_from_slice(&chunk);
     }
     return Ok(body);
+}
+
+fn self_update() -> Result<()> {
+    let package = format!("iso-lattes/isl-desktop-cli@{}", env!("CARGO_PKG_VERSION"));
+    let status = Command::new("zed")
+        .args(["install", &package, "--allow-build", "--adapter", "none"])
+        .status()
+        .context("failed to launch zed for self-update")?;
+    if !status.success() {
+        bail!("zed self-update failed: {status}");
+    }
+    return Ok(());
 }
 
 fn required(value: Option<String>, flag: &str) -> Result<String> {
